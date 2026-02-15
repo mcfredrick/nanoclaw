@@ -9,15 +9,23 @@ cd "$SCRIPT_DIR"
 IMAGE_NAME="nanoclaw-agent"
 TAG="${1:-latest}"
 
+# Detect container runtime
+if [ "$CONTAINER_RUNTIME" = "docker" ] || ! command -v container &> /dev/null; then
+  RUNTIME="docker"
+else
+  RUNTIME="container"
+fi
+
 echo "Building NanoClaw agent container image..."
 echo "Image: ${IMAGE_NAME}:${TAG}"
+echo "Runtime: ${RUNTIME}"
 
-# Build with Apple Container
-container build -t "${IMAGE_NAME}:${TAG}" .
+# Build with detected runtime
+${RUNTIME} build -t "${IMAGE_NAME}:${TAG}" .
 
 echo ""
 echo "Build complete!"
 echo "Image: ${IMAGE_NAME}:${TAG}"
 echo ""
 echo "Test with:"
-echo "  echo '{\"prompt\":\"What is 2+2?\",\"groupFolder\":\"test\",\"chatJid\":\"test@g.us\",\"isMain\":false}' | container run -i ${IMAGE_NAME}:${TAG}"
+echo "  echo '{\"prompt\":\"What is 2+2?\",\"groupFolder\":\"test\",\"chatJid\":\"test@g.us\",\"isMain\":false}' | ${RUNTIME} run -i ${IMAGE_NAME}:${TAG}"

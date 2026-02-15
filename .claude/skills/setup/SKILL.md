@@ -1,11 +1,11 @@
 ---
 name: setup
-description: Run initial NanoClaw setup. Use when user wants to install dependencies, authenticate WhatsApp, register their main channel, or start the background services. Triggers on "setup", "install", "configure nanoclaw", or first-time setup requests.
+description: Run initial NanoClaw setup. Use when user wants to install dependencies, authenticate Signal, register their main channel, or start the background services. Triggers on "setup", "install", "configure nanoclaw", or first-time setup requests.
 ---
 
 # NanoClaw Setup
 
-Run all commands automatically. Only pause when user action is required (WhatsApp authentication, configuration choices).
+Run all commands automatically. Only pause when user action is required (Signal authentication, configuration choices).
 
 **UX Note:** When asking the user questions, prefer using the `AskUserQuestion` tool instead of just outputting text. This integrates with Claude's built-in question/answer system for a better experience.
 
@@ -21,372 +21,90 @@ First, detect the platform and check what's available:
 
 ```bash
 echo "Platform: $(uname -s)"
-which container && echo "Apple Container: installed" || echo "Apple Container: not installed"
 which docker && docker info >/dev/null 2>&1 && echo "Docker: installed and running" || echo "Docker: not installed or not running"
 ```
 
-### If NOT on macOS (Linux, etc.)
-
-Apple Container is macOS-only. Use Docker instead.
+### If Docker is NOT installed
 
 Tell the user:
-> You're on Linux, so we'll use Docker for container isolation. Let me set that up now.
-
-**Use the `/convert-to-docker` skill** to convert the codebase to Docker, then continue to Section 3.
-
-### If on macOS
-
-**If Apple Container is already installed:** Continue to Section 3.
-
-**If Apple Container is NOT installed:** Ask the user:
-> NanoClaw needs a container runtime for isolated agent execution. You have two options:
+> NanoClaw needs Docker for container isolation. Docker will be used to run both the Signal API and NanoClaw services.
 >
-> 1. **Apple Container** (default) - macOS-native, lightweight, designed for Apple silicon
-> 2. **Docker** - Cross-platform, widely used, works on macOS and Linux
->
-> Which would you prefer?
+> Would you like me to help you install Docker Desktop?
 
-#### Option A: Apple Container
+If the user says yes, provide installation instructions:
+> 1. Download Docker Desktop from https://www.docker.com/products/docker-desktop/
+> 2. Install the package
+> 3. Start Docker Desktop and ensure it's running
+> 4. Run `docker info` to verify it's working
 
-Tell the user:
-> Apple Container is required for running agents in isolated environments.
->
-> 1. Download the latest `.pkg` from https://github.com/apple/container/releases
-> 2. Double-click to install
-> 3. Run `container system start` to start the service
->
-> Let me know when you've completed these steps.
-
-Wait for user confirmation, then verify:
+Wait for the user to confirm Docker is installed and running, then verify:
 
 ```bash
-container system start
-container --version
+docker info
 ```
 
-**Note:** NanoClaw automatically starts the Apple Container system when it launches, so you don't need to start it manually after reboots.
+### If Docker is installed
 
-#### Option B: Docker
+Continue to Section 3.
 
-Tell the user:
-> You've chosen Docker. Let me set that up now.
-
-**Use the `/convert-to-docker` skill** to convert the codebase to Docker, then continue to Section 3.
-
-## 3. Configure Claude Authentication
-
-Ask the user:
-> Do you want to use your **Claude subscription** (Pro/Max) or an **Anthropic API key**?
-
-### Option 1: Claude Subscription (Recommended)
-
-Tell the user:
-> Open another terminal window and run:
-> ```
-> claude setup-token
-> ```
-> A browser window will open for you to log in. Once authenticated, the token will be displayed in your terminal. Either:
-> 1. Paste it here and I'll add it to `.env` for you, or
-> 2. Add it to `.env` yourself as `CLAUDE_CODE_OAUTH_TOKEN=<your-token>`
-
-If they give you the token, add it to `.env`. **Never echo the full token in commands or output** — use the Write tool to write the `.env` file directly, or tell the user to add it themselves:
-
-```bash
-echo "CLAUDE_CODE_OAUTH_TOKEN=<token>" > .env
-```
-
-### Option 2: API Key
-
-Ask if they have an existing key to copy or need to create one.
-
-**Copy existing:**
-```bash
-grep "^ANTHROPIC_API_KEY=" /path/to/source/.env > .env
-```
-
-**Create new:**
-```bash
-echo 'ANTHROPIC_API_KEY=' > .env
-```
-
-Tell the user to add their key from https://console.anthropic.com/
-
-**Verify:**
-```bash
-KEY=$(grep "^ANTHROPIC_API_KEY=" .env | cut -d= -f2)
-[ -n "$KEY" ] && echo "API key configured: ${KEY:0:7}..." || echo "Missing"
-```
-
-## 4. Build Container Image
-
-Build the NanoClaw agent container:
-
-```bash
-./container/build.sh
-```
-
-This creates the `nanoclaw-agent:latest` image with Node.js, Chromium, Claude Code CLI, and agent-browser.
-
-Verify the build succeeded by running a simple test (this auto-detects which runtime you're using):
-
-```bash
-if which docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
-  echo '{}' | docker run -i --entrypoint /bin/echo nanoclaw-agent:latest "Container OK" || echo "Container build failed"
-else
-  echo '{}' | container run -i --entrypoint /bin/echo nanoclaw-agent:latest "Container OK" || echo "Container build failed"
-fi
-```
-
-## 5. WhatsApp Authentication
+## 5. Docker Setup and Services
 
 **USER ACTION REQUIRED**
 
-The auth script supports two methods: QR code scanning and pairing code (phone number). Ask the user which they prefer.
+NanoClaw uses Docker for all services. The setup will start both the Signal API and NanoClaw services.
 
-The auth script writes status to `store/auth-status.txt`:
-- `already_authenticated` — credentials already exist
-- `pairing_code:<CODE>` — pairing code generated, waiting for user to enter it
-- `authenticated` — successfully authenticated
-- `failed:<reason>` — authentication failed
-
-The script automatically handles error 515 (stream error after pairing) by reconnecting — this is normal and expected during pairing code auth.
-
-### Ask the user which method to use
-
-> How would you like to authenticate WhatsApp?
->
-> 1. **QR code in browser** (Recommended) — Opens a page with the QR code to scan
-> 2. **Pairing code** — Enter a numeric code on your phone, no camera needed
-> 3. **QR code in terminal** — Run the auth command yourself in another terminal
-
-### Option A: QR Code in Browser (Recommended)
-
-Clean any stale auth state and start auth in background:
-
-```bash
-rm -rf store/auth store/qr-data.txt store/auth-status.txt
-npm run auth
-```
-
-Run this with `run_in_background: true`.
-
-Poll for QR data (up to 15 seconds):
-
-```bash
-for i in $(seq 1 15); do if [ -f store/qr-data.txt ]; then echo "qr_ready"; exit 0; fi; STATUS=$(cat store/auth-status.txt 2>/dev/null || echo "waiting"); if [ "$STATUS" = "already_authenticated" ]; then echo "$STATUS"; exit 0; fi; sleep 1; done; echo "timeout"
-```
-
-If `already_authenticated`, skip to the next step.
-
-If QR data is ready, generate the QR as SVG and inject it into the HTML template:
-
-```bash
-node -e "
-const QR = require('qrcode');
-const fs = require('fs');
-const qrData = fs.readFileSync('store/qr-data.txt', 'utf8');
-QR.toString(qrData, { type: 'svg' }, (err, svg) => {
-  if (err) process.exit(1);
-  const template = fs.readFileSync('.claude/skills/setup/qr-auth.html', 'utf8');
-  fs.writeFileSync('store/qr-auth.html', template.replace('{{QR_SVG}}', svg));
-  console.log('done');
-});
-"
-```
-
-Then open it:
-
-```bash
-open store/qr-auth.html
-```
+### 5a. Create Environment Variables
 
 Tell the user:
-> A browser window should have opened with the QR code. It expires in about 60 seconds.
+> I need your Signal phone number in E.164 format (e.g. `+14155551234`) to configure the environment.
+> You can either:
+> 1. Provide it here and I'll add it to `.env`, or
+> 2. Add it yourself to `.env` as `SIGNAL_PHONE_NUMBER=<your-number>`
+
+If they provide the number, add it to `.env`:
+```bash
+echo "SIGNAL_PHONE_NUMBER=+PHONE_NUMBER_HERE" > .env
+```
+
+### 5b. Start Docker Services
+
+```bash
+docker compose up -d
+```
+
+Wait for the containers to be healthy:
+
+```bash
+for i in $(seq 1 30); do
+  if curl -s http://localhost:8080/v1/about >/dev/null 2>&1 && curl -s http://localhost:3002/health >/dev/null 2>&1; then
+    echo "All services ready"
+    exit 0
+  fi
+  sleep 2
+done
+echo "timeout waiting for services"
+```
+
+### 5c. Verify Signal Account
+
+Tell the user:
+> Open this URL in your browser to see the QR code for linking your Signal account:
 >
-> Scan it with WhatsApp: **Settings → Linked Devices → Link a Device**
-
-Then poll for completion (up to 120 seconds):
-
-```bash
-for i in $(seq 1 60); do STATUS=$(cat store/auth-status.txt 2>/dev/null || echo "waiting"); if [ "$STATUS" = "authenticated" ] || [ "$STATUS" = "already_authenticated" ]; then echo "$STATUS"; exit 0; elif echo "$STATUS" | grep -q "^failed:"; then echo "$STATUS"; exit 0; fi; sleep 2; done; echo "timeout"
-```
-
-- If `authenticated`, success — clean up with `rm -f store/qr-auth.html` and continue.
-- If `failed:qr_timeout`, offer to retry (re-run the auth and regenerate the HTML page).
-- If `failed:logged_out`, delete `store/auth/` and retry.
-
-### Option B: Pairing Code
-
-Ask the user for their phone number (with country code, no + or spaces, e.g. `14155551234`).
-
-Clean any stale auth state and start:
-
-```bash
-rm -rf store/auth store/qr-data.txt store/auth-status.txt
-npx tsx src/whatsapp-auth.ts --pairing-code --phone PHONE_NUMBER
-```
-
-Run this with `run_in_background: true`.
-
-Poll for the pairing code (up to 15 seconds):
-
-```bash
-for i in $(seq 1 15); do STATUS=$(cat store/auth-status.txt 2>/dev/null || echo "waiting"); if echo "$STATUS" | grep -q "^pairing_code:"; then echo "$STATUS"; exit 0; elif [ "$STATUS" = "authenticated" ] || [ "$STATUS" = "already_authenticated" ]; then echo "$STATUS"; exit 0; elif echo "$STATUS" | grep -q "^failed:"; then echo "$STATUS"; exit 0; fi; sleep 1; done; echo "timeout"
-```
-
-Extract the code from the status (e.g. `pairing_code:ABC12DEF` → `ABC12DEF`) and tell the user:
-
-> Your pairing code: **CODE_HERE**
+> **http://localhost:8080/v1/qrcodelink?device_name=nanoclaw**
 >
-> 1. Open WhatsApp on your phone
-> 2. Tap **Settings → Linked Devices → Link a Device**
-> 3. Tap **"Link with phone number instead"**
-> 4. Enter the code: **CODE_HERE**
+> Then on your phone: **Signal → Settings → Linked Devices → Link New Device** and scan the QR code.
 
-Then poll for completion (up to 120 seconds):
+Wait for the user to confirm they've linked the device.
 
-```bash
-for i in $(seq 1 60); do STATUS=$(cat store/auth-status.txt 2>/dev/null || echo "waiting"); if [ "$STATUS" = "authenticated" ] || [ "$STATUS" = "already_authenticated" ]; then echo "$STATUS"; exit 0; elif echo "$STATUS" | grep -q "^failed:"; then echo "$STATUS"; exit 0; fi; sleep 2; done; echo "timeout"
-```
-
-- If `authenticated` or `already_authenticated`, success — continue to next step.
-- If `failed:logged_out`, delete `store/auth/` and retry.
-- If `failed:515` or timeout, the 515 reconnect should handle this automatically. If it persists, the user may need to temporarily stop other WhatsApp-connected apps on the same device.
-
-### Option C: QR Code in Terminal
-
-Tell the user to run the auth command in another terminal window:
-
-> Open another terminal and run:
-> ```
-> cd PROJECT_PATH && npm run auth
-> ```
-> Scan the QR code that appears, then let me know when it says "Successfully authenticated".
-
-Replace `PROJECT_PATH` with the actual project path (use `pwd`).
-
-Wait for the user to confirm authentication succeeded, then continue to the next step.
-
-## 6. Configure Assistant Name and Main Channel
-
-This step configures three things at once: the trigger word, the main channel type, and the main channel selection.
-
-### 6a. Ask for trigger word
-
-Ask the user:
-> What trigger word do you want to use? (default: `Andy`)
->
-> In group chats, messages starting with `@TriggerWord` will be sent to Claude.
-> In your main channel (and optionally solo chats), no prefix is needed — all messages are processed.
-
-Store their choice for use in the steps below.
-
-### 6b. Explain security model and ask about main channel type
-
-**Use the AskUserQuestion tool** to present this:
-
-> **Important: Your "main" channel is your admin control portal.**
->
-> The main channel has elevated privileges:
-> - Can see messages from ALL other registered groups
-> - Can manage and delete tasks across all groups
-> - Can write to global memory that all groups can read
-> - Has read-write access to the entire NanoClaw project
->
-> **Recommendation:** Use your personal "Message Yourself" chat or a solo WhatsApp group as your main channel. This ensures only you have admin control.
->
-> **Question:** Which setup will you use for your main channel?
->
-> Options:
-> 1. Personal chat (Message Yourself) - Recommended
-> 2. DM with a specific phone number (e.g. your other phone)
-> 3. Solo WhatsApp group (just me)
-> 4. Group with other people (I understand the security implications)
-
-If they choose option 4, ask a follow-up:
-
-> You've chosen a group with other people. This means everyone in that group will have admin privileges over NanoClaw.
->
-> Are you sure you want to proceed? The other members will be able to:
-> - Read messages from your other registered chats
-> - Schedule and manage tasks
-> - Access any directories you've mounted
->
-> Options:
-> 1. Yes, I understand and want to proceed
-> 2. No, let me use a personal chat or solo group instead
-
-### 6c. Register the main channel
-
-First build, then start the app briefly to connect to WhatsApp and sync group metadata. Use the Bash tool's timeout parameter (15000ms) — do NOT use the `timeout` shell command (it's not available on macOS). The app will be killed when the timeout fires, which is expected.
+### 5d. Verify the link
 
 ```bash
-npm run build
+curl -s http://localhost:8080/v1/about | python3 -m json.tool 2>/dev/null || curl -s http://localhost:8080/v1/about
 ```
 
-Then run briefly (set Bash tool timeout to 15000ms):
-```bash
-npm run dev
-```
+This should show account information. If it shows an empty accounts list, the linking failed — ask the user to try again.
 
-**For personal chat** (they chose option 1):
-
-Personal chats are NOT synced to the database on startup — only groups are. The JID for "Message Yourself" is the bot's own number. Use the number from the WhatsApp auth step and construct the JID as `{number}@s.whatsapp.net`.
-
-**For DM with a specific number** (they chose option 2):
-
-Ask the user for the phone number (with country code, no + or spaces, e.g. `14155551234`), then construct the JID as `{number}@s.whatsapp.net`.
-
-**For group** (they chose option 3 or 4):
-
-Groups are synced on startup via `groupFetchAllParticipating`. Query the database for recent groups:
-```bash
-sqlite3 store/messages.db "SELECT jid, name FROM chats WHERE jid LIKE '%@g.us' AND jid != '__group_sync__' ORDER BY last_message_time DESC LIMIT 40"
-```
-
-Show only the **10 most recent** group names to the user and ask them to pick one. If they say their group isn't in the list, show the next batch from the results you already have. If they tell you the group name directly, look it up:
-```bash
-sqlite3 store/messages.db "SELECT jid, name FROM chats WHERE name LIKE '%GROUP_NAME%' AND jid LIKE '%@g.us'"
-```
-
-### 6d. Write the configuration
-
-Once you have the JID, configure it. Use the assistant name from step 6a.
-
-For personal chats (solo, no prefix needed), set `requiresTrigger` to `false`:
-
-```json
-{
-  "JID_HERE": {
-    "name": "main",
-    "folder": "main",
-    "trigger": "@ASSISTANT_NAME",
-    "added_at": "CURRENT_ISO_TIMESTAMP",
-    "requiresTrigger": false
-  }
-}
-```
-
-For groups, keep `requiresTrigger` as `true` (default).
-
-Write to the database directly by creating a temporary registration script, or write `data/registered_groups.json` which will be auto-migrated on first run:
-
-```bash
-mkdir -p data
-```
-
-Then write `data/registered_groups.json` with the correct JID, trigger, and timestamp.
-
-If the user chose a name other than `Andy`, also update:
-1. `groups/global/CLAUDE.md` - Change "# Andy" and "You are Andy" to the new name
-2. `groups/main/CLAUDE.md` - Same changes at the top
-
-Ensure the groups folder exists:
-```bash
-mkdir -p groups/main/logs
-```
-
-## 7. Configure External Directory Access (Mount Allowlist)
+### 5e. Configure External Directory Access (Mount Allowlist)
 
 Ask the user:
 > Do you want the agent to be able to access any directories **outside** the NanoClaw project?
@@ -413,7 +131,7 @@ Skip to the next step.
 
 If **yes**, ask follow-up questions:
 
-### 7a. Collect Directory Paths
+### 5f. Collect Directory Paths
 
 Ask the user:
 > Which directories do you want to allow access to?
@@ -430,14 +148,14 @@ For each directory they provide, ask:
 > Read-write is needed for: code changes, creating files, git commits
 > Read-only is safer for: reference docs, config examples, templates
 
-### 7b. Configure Non-Main Group Access
+### 5g. Configure Non-Main Group Access
 
 Ask the user:
-> Should **non-main groups** (other WhatsApp chats you add later) be restricted to **read-only** access even if read-write is allowed for the directory?
+> Should **non-main groups** (other Signal chats you add later) be restricted to **read-only** access even if read-write is allowed for the directory?
 >
 > Recommended: **Yes** - this prevents other groups from modifying files even if you grant them access to a directory.
 
-### 7c. Create the Allowlist
+### 5h. Create the Allowlist
 
 Create the allowlist file based on their answers:
 
@@ -493,66 +211,194 @@ Tell the user:
 > }
 > ```
 > The folder appears inside the container at `/workspace/extra/<folder-name>` (derived from the last segment of the path). Add `"readonly": false` for write access, or `"containerPath": "custom-name"` to override the default name.
-
-## 8. Configure launchd Service
-
-Generate the plist file with correct paths automatically:
-
-```bash
-NODE_PATH=$(which node)
-PROJECT_PATH=$(pwd)
-HOME_PATH=$HOME
-
-cat > ~/Library/LaunchAgents/com.nanoclaw.plist << EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.nanoclaw</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>${NODE_PATH}</string>
-        <string>${PROJECT_PATH}/dist/index.js</string>
-    </array>
-    <key>WorkingDirectory</key>
-    <string>${PROJECT_PATH}</string>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <true/>
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>PATH</key>
-        <string>/usr/local/bin:/usr/bin:/bin:${HOME_PATH}/.local/bin</string>
-        <key>HOME</key>
-        <string>${HOME_PATH}</string>
-    </dict>
-    <key>StandardOutPath</key>
-    <string>${PROJECT_PATH}/logs/nanoclaw.log</string>
-    <key>StandardErrorPath</key>
-    <string>${PROJECT_PATH}/logs/nanoclaw.error.log</string>
-</dict>
-</plist>
-EOF
-
-echo "Created launchd plist with:"
-echo "  Node: ${NODE_PATH}"
-echo "  Project: ${PROJECT_PATH}"
 ```
 
-Build and start the service:
+## 4. Build Container Image
+
+Build the NanoClaw agent container:
 
 ```bash
-npm run build
-mkdir -p logs
-launchctl load ~/Library/LaunchAgents/com.nanoclaw.plist
+docker compose build
 ```
 
-Verify it's running:
+This creates the container image with Node.js, Chromium, Claude Code CLI, and agent-browser.
+
+Verify the build succeeded by running a simple test:
+
 ```bash
-launchctl list | grep nanoclaw
+curl -s http://localhost:3002/health >/dev/null && echo "Container OK" || echo "Container build failed"
 ```
+
+## 5. Docker Setup and Services
+
+**USER ACTION REQUIRED**
+
+NanoClaw uses Docker for all services. The setup will start both the Signal API and NanoClaw services.
+
+### 5a. Create Environment Variables
+
+Tell the user:
+> I need your Signal phone number in E.164 format (e.g. `+14155551234`) to configure the environment.
+> You can either:
+> 1. Provide it here and I'll add it to `.env`, or
+> 2. Add it yourself to `.env` as `SIGNAL_PHONE_NUMBER=<your-number>`
+
+If they provide the number, add it to `.env`:
+```bash
+echo "SIGNAL_PHONE_NUMBER=+PHONE_NUMBER_HERE" > .env
+```
+
+### 5b. Start Docker Services
+
+```bash
+docker compose up -d
+```
+
+Wait for the containers to be healthy:
+
+```bash
+for i in $(seq 1 30); do
+  if curl -s http://localhost:8080/v1/about >/dev/null 2>&1 && curl -s http://localhost:3002/health >/dev/null 2>&1; then
+    echo "All services ready"
+    exit 0
+  fi
+  sleep 2
+done
+echo "timeout waiting for services"
+```
+
+### 5c. Verify Signal Account
+
+Tell the user:
+> Open this URL in your browser to see the QR code for linking your Signal account:
+>
+> **http://localhost:8080/v1/qrcodelink?device_name=nanoclaw**
+>
+> Then on your phone: **Signal → Settings → Linked Devices → Link New Device** and scan the QR code.
+
+Wait for the user to confirm they've linked the device.
+
+### 5d. Verify the link
+
+```bash
+curl -s http://localhost:8080/v1/about | python3 -m json.tool 2>/dev/null || curl -s http://localhost:8080/v1/about
+```
+
+This should show account information. If it shows an empty accounts list, the linking failed — ask the user to try again.
+
+### 5b. Link Signal account
+
+Tell the user:
+> Open this URL in your browser to see the QR code for linking your Signal account:
+>
+> **http://localhost:8080/v1/qrcodelink?device_name=nanoclaw**
+>
+> Then on your phone: **Signal → Settings → Linked Devices → Link New Device** and scan the QR code.
+
+Wait for the user to confirm they've linked the device.
+
+### 5c. Verify the link
+
+```bash
+curl -s http://localhost:8080/v1/about | python3 -m json.tool 2>/dev/null || curl -s http://localhost:8080/v1/about
+```
+
+This should show account information. If it shows an empty accounts list, the linking failed — ask the user to try again.
+
+### 5d. Get the phone number
+
+Ask the user for their Signal phone number in E.164 format (e.g. `+14155551234`). This is needed for `SIGNAL_PHONE_NUMBER` in `.env`.
+
+Add it to `.env`:
+```bash
+echo "SIGNAL_PHONE_NUMBER=+PHONE_NUMBER_HERE" >> .env
+```
+
+## 8. Troubleshooting
+
+**Services not starting**: Check Docker status:
+```bash
+docker ps
+```
+
+**Signal account not linked**:
+- Visit `http://localhost:8080/v1/qrcodelink?device_name=nanoclaw` to re-link
+- Verify with `curl http://localhost:8080/v1/about`
+
+**Container agent fails with "Claude Code process exited with code 1"**:
+- Ensure Docker is running: `docker info`
+- Check container logs: `docker compose logs -f`
+
+**No response to messages**:
+- Verify the trigger pattern matches (e.g., `@AssistantName` at start of message)
+- Main channel doesn't require a prefix — all messages are processed
+- Personal/solo chats with `requiresTrigger: false` also don't need a prefix
+- Check that the chat JID is in the database: `sqlite3 store/messages.db "SELECT * FROM registered_groups"`
+- Check that signal-cli-rest-api is sending webhooks: `curl http://localhost:8080/v1/about`
+- Ensure `SIGNAL_PHONE_NUMBER` is set correctly in `.env`
+- Check `logs/nanoclaw.log` for errors
+
+## 8. Troubleshooting
+
+**Services not starting**: Check Docker status:
+```bash
+docker ps
+```
+
+**Signal account not linked**:
+- Visit `http://localhost:8080/v1/qrcodelink?device_name=nanoclaw` to re-link
+- Verify with `curl http://localhost:8080/v1/about`
+
+**Container agent fails with "Claude Code process exited with code 1"**:
+- Ensure Docker is running: `docker info`
+- Check container logs: `docker compose logs -f`
+
+**No response to messages**:
+- Verify the trigger pattern matches (e.g., `@AssistantName` at start of message)
+- Main channel doesn't require a prefix — all messages are processed
+- Personal/solo chats with `requiresTrigger: false` also don't need a prefix
+- Check that the chat JID is in the database: `sqlite3 store/messages.db "SELECT * FROM registered_groups"`
+- Check that signal-cli-rest-api is sending webhooks: `curl http://localhost:8080/v1/about`
+- Ensure `SIGNAL_PHONE_NUMBER` is set correctly in `.env`
+- Check `logs/nanoclaw.log` for errors
+
+## 8. Test
+
+Tell the user (using the assistant name they configured):
+> Send `@ASSISTANT_NAME hello` in your registered chat.
+>
+> **Tip:** In your main channel, you don't need the `@` prefix — just send `hello` and the agent will respond.
+
+Check the logs:
+```bash
+tail -f logs/nanoclaw.log
+```
+
+The user should receive a response in Signal.
+
+## Troubleshooting
+
+**Services not starting**: Check Docker status:
+```bash
+docker ps
+```
+
+**Signal account not linked**:
+- Visit `http://localhost:8080/v1/qrcodelink?device_name=nanoclaw` to re-link
+- Verify with `curl http://localhost:8080/v1/about`
+
+**Container agent fails with "Claude Code process exited with code 1"**:
+- Ensure Docker is running: `docker info`
+- Check container logs: `docker compose logs -f`
+
+**No response to messages**:
+- Verify the trigger pattern matches (e.g., `@AssistantName` at start of message)
+- Main channel doesn't require a prefix — all messages are processed
+- Personal/solo chats with `requiresTrigger: false` also don't need a prefix
+- Check that the chat JID is in the database: `sqlite3 store/messages.db "SELECT * FROM registered_groups"`
+- Check that signal-cli-rest-api is sending webhooks: `curl http://localhost:8080/v1/about`
+- Ensure `SIGNAL_PHONE_NUMBER` is set correctly in `.env`
+- Check `logs/nanoclaw.log` for errors
 
 ## 9. Test
 
@@ -566,11 +412,20 @@ Check the logs:
 tail -f logs/nanoclaw.log
 ```
 
-The user should receive a response in WhatsApp.
+The user should receive a response in Signal.
 
 ## Troubleshooting
 
 **Service not starting**: Check `logs/nanoclaw.error.log`
+
+**signal-cli-rest-api not running**:
+- Check Docker: `docker ps | grep signal`
+- Restart: `docker compose -f docker-compose.signal.yml up -d`
+- Check logs: `docker compose -f docker-compose.signal.yml logs -f`
+
+**Signal account not linked**:
+- Visit `http://localhost:8080/v1/qrcodelink?device_name=nanoclaw` to re-link
+- Verify with `curl http://localhost:8080/v1/about`
 
 **Container agent fails with "Claude Code process exited with code 1"**:
 - Ensure the container runtime is running:
@@ -583,18 +438,14 @@ The user should receive a response in WhatsApp.
 - Main channel doesn't require a prefix — all messages are processed
 - Personal/solo chats with `requiresTrigger: false` also don't need a prefix
 - Check that the chat JID is in the database: `sqlite3 store/messages.db "SELECT * FROM registered_groups"`
+- Check that signal-cli-rest-api is sending webhooks: `curl http://localhost:8080/v1/about`
+- Ensure `SIGNAL_PHONE_NUMBER` is set correctly in `.env`
 - Check `logs/nanoclaw.log` for errors
 
-**Messages sent but not received by NanoClaw (DMs)**:
-- WhatsApp may use LID (Linked Identity) JIDs for DMs instead of phone numbers
-- Check logs for `Translated LID to phone JID` — if missing, the LID isn't being resolved
-- The `translateJid` method in `src/channels/whatsapp.ts` uses `sock.signalRepository.lidMapping.getPNForLID()` to resolve LIDs
-- Verify the registered JID doesn't have a device suffix (should be `number@s.whatsapp.net`, not `number:0@s.whatsapp.net`)
-
-**WhatsApp disconnected**:
-- The service will show a macOS notification
-- Run `npm run auth` to re-authenticate
-- Restart the service: `launchctl kickstart -k gui/$(id -u)/com.nanoclaw`
+**Webhook not receiving messages**:
+- Ensure `RECEIVE_WEBHOOK_URL` in docker-compose points to `http://host.docker.internal:3002/webhook/signal`
+- Test the webhook manually: `curl -X POST http://localhost:3002/webhook/signal -H 'Content-Type: application/json' -d '{"envelope":{}}'`
+- Check Docker networking: `docker compose -f docker-compose.signal.yml logs signal-api`
 
 **Unload service**:
 ```bash

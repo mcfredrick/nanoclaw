@@ -1,0 +1,16 @@
+# Signal API only — use this when running NanoClaw directly on the host
+# Start: docker compose -f docker-compose.signal.yml up -d
+services:
+  signal-api:
+    image: bbernhard/signal-cli-rest-api:latest
+    environment:
+      - MODE=json-rpc
+      - RECEIVE_WEBHOOK_URL=http://host.docker.internal:3002/webhook/signal
+    ports:
+      - "8080:8080"
+    volumes:
+      - signal-data:/home/.local/share/signal-cli
+    restart: unless-stopped
+
+volumes:
+  signal-data:

@@ -14,24 +14,23 @@ Both timers fire at the same time, so containers always exit via hard SIGKILL (c
 ## Quick Status Check
 
 ```bash
-# 1. Is the service running?
-launchctl list | grep nanoclaw
-# Expected: PID  0  com.nanoclaw (PID = running, "-" = not running, non-zero exit = crashed)
+# 1. Are services running?
+docker compose ps
 
-# 2. Any running containers?
-container ls --format '{{.Names}} {{.Status}}' 2>/dev/null | grep nanoclaw
+# 2. Any running agent containers?
+docker ps --filter "name=nanoclaw-" --format "{{.Names}} {{.Status}}"
 
-# 3. Any stopped/orphaned containers?
-container ls -a --format '{{.Names}} {{.Status}}' 2>/dev/null | grep nanoclaw
+# 3. Recent errors in service log?
+docker compose logs nanoclaw --tail 50 2>&1 | grep -E 'ERROR|WARN'
 
-# 4. Recent errors in service log?
-grep -E 'ERROR|WARN' logs/nanoclaw.log | tail -20
+# 4. Is Signal API connected?
+curl -s http://localhost:8080/v1/accounts
 
-# 5. Is WhatsApp connected? (look for last connection event)
-grep -E 'Connected to WhatsApp|Connection closed|connection.*close' logs/nanoclaw.log | tail -5
+# 5. Is NanoClaw healthy?
+curl -s http://localhost:3002/health
 
 # 6. Are groups loaded?
-grep 'groupCount' logs/nanoclaw.log | tail -3
+docker compose logs nanoclaw --tail 50 2>&1 | grep 'groupCount'
 ```
 
 ## Session Transcript Branching
@@ -77,8 +76,8 @@ grep -E 'Scheduling retry|retry|Max retries' logs/nanoclaw.log | tail -10
 ## Agent Not Responding
 
 ```bash
-# Check if messages are being received from WhatsApp
-grep 'New messages' logs/nanoclaw.log | tail -10
+# Check if messages are being received from Signal
+docker compose logs nanoclaw --tail 100 2>&1 | grep 'New messages' | tail -10
 
 # Check if messages are being processed (container spawned)
 grep -E 'Processing messages|Spawning container' logs/nanoclaw.log | tail -10
@@ -110,34 +109,34 @@ sqlite3 store/messages.db "SELECT name, container_config FROM registered_groups;
 container run -i --rm --entrypoint ls nanoclaw-agent:latest /workspace/extra/
 ```
 
-## WhatsApp Auth Issues
+## Signal Auth Issues
 
 ```bash
-# Check if QR code was requested (means auth expired)
-grep 'QR\|authentication required\|qr' logs/nanoclaw.log | tail -5
+# Check if Signal account is linked
+curl -s http://localhost:8080/v1/accounts
 
-# Check auth files exist
-ls -la store/auth/
+# Re-link Signal account (open in browser)
+# http://localhost:8080/v1/qrcodelink?device_name=nanoclaw
 
-# Re-authenticate if needed
-npm run auth
+# Check signal-api logs
+docker compose logs signal-api --tail 20
 ```
 
 ## Service Management
 
 ```bash
-# Restart the service
-launchctl kickstart -k gui/$(id -u)/com.nanoclaw
-
 # View live logs
-tail -f logs/nanoclaw.log
+docker compose logs -f nanoclaw
 
-# Stop the service (careful — running containers are detached, not killed)
-launchctl bootout gui/$(id -u)/com.nanoclaw
-
-# Start the service
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.nanoclaw.plist
+# Restart NanoClaw only
+docker compose restart nanoclaw
 
 # Rebuild after code changes
-npm run build && launchctl kickstart -k gui/$(id -u)/com.nanoclaw
+docker compose build nanoclaw && docker compose up -d nanoclaw
+
+# Stop all services
+docker compose down
+
+# Start all services
+docker compose up -d
 ```

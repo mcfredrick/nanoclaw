@@ -1,0 +1,42 @@
+services:
+  signal-api:
+    image: bbernhard/signal-cli-rest-api:latest
+    environment:
+      - MODE=json-rpc
+      - RECEIVE_WEBHOOK_URL=http://nanoclaw:3002/webhook/signal
+    ports:
+      - "8080:8080"
+    volumes:
+      - signal-data:/home/.local/share/signal-cli
+    restart: unless-stopped
+
+  nanoclaw:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    ports:
+      - "3002:3002"
+    volumes:
+      - ./data:/app/data
+      - ./groups:/app/groups
+      - ./store:/app/store
+      - ./container/agent-runner/src:/app/container/agent-runner/src:ro
+      - ./container/skills:/app/container/skills:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - DOCKER_API_VERSION=1.43
+      - HOST_PROJECT_ROOT=${PWD}
+      - CONTAINER_RUNTIME=docker
+      - SIGNAL_API_URL=http://signal-api:8080
+    depends_on:
+      - signal-api
+    restart: unless-stopped
+
+volumes:
+  signal-data:
+
+networks:
+  default:
+    name: nanoclaw-network

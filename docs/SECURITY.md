@@ -7,13 +7,13 @@
 | Main group | Trusted | Private self-chat, admin control |
 | Non-main groups | Untrusted | Other users may be malicious |
 | Container agents | Sandboxed | Isolated execution environment |
-| WhatsApp messages | User input | Potential prompt injection |
+| Signal messages | User input | Potential prompt injection |
 
 ## Security Boundaries
 
 ### 1. Container Isolation (Primary Boundary)
 
-Agents execute in Apple Container (lightweight Linux VMs), providing:
+Agents execute in Docker containers, providing:
 - **Process isolation** - Container processes cannot affect the host
 - **Filesystem isolation** - Only explicitly mounted directories are visible
 - **Non-root execution** - Runs as unprivileged `node` user (uid 1000)
@@ -66,14 +66,14 @@ Messages and task operations are verified against group identity:
 - Claude auth tokens (filtered from `.env`, read-only)
 
 **NOT Mounted:**
-- WhatsApp session (`store/auth/`) - host only
+- Signal session data (Docker volume `signal-data`) - managed by signal-api container
 - Mount allowlist - external, never mounted
 - Any credentials matching blocked patterns
 
 **Credential Filtering:**
 Only these environment variables are exposed to containers:
 ```typescript
-const allowedVars = ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY'];
+const allowedVars = ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL', 'DEFAULT_MODEL'];
 ```
 
 > **Note:** Anthropic credentials are mounted so that Claude Code can authenticate when the agent runs. However, this means the agent itself can discover these credentials via Bash or file operations. Ideally, Claude Code would authenticate without exposing credentials to the agent's execution environment, but I couldn't figure this out. **PRs welcome** if you have ideas for credential isolation.
@@ -94,7 +94,7 @@ const allowedVars = ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY'];
 ```
 ┌──────────────────────────────────────────────────────────────────┐
 │                        UNTRUSTED ZONE                             │
-│  WhatsApp Messages (potentially malicious)                        │
+│  Signal Messages (potentially malicious)                        │
 └────────────────────────────────┬─────────────────────────────────┘
                                  │
                                  ▼ Trigger check, input escaping

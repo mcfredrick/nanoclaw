@@ -57,6 +57,22 @@ interface VolumeMount {
   readonly: boolean;
 }
 
+/**
+ * Resolve a path for use as a Docker volume mount source.
+ * When NanoClaw runs inside Docker (HOST_PROJECT_ROOT is set), volume mounts
+ * must reference the host filesystem, not the container's filesystem.
+ */
+function resolveHostPath(containerPath: string): string {
+  const hostRoot = process.env.HOST_PROJECT_ROOT;
+  if (!hostRoot) return containerPath;
+
+  const projectRoot = process.cwd();
+  if (containerPath.startsWith(projectRoot)) {
+    return hostRoot + containerPath.slice(projectRoot.length);
+  }
+  return containerPath;
+}
+
 function buildVolumeMounts(
   group: RegisteredGroup,
   isMain: boolean,
@@ -68,31 +84,30 @@ function buildVolumeMounts(
   if (isMain) {
     // Main gets the entire project root mounted
     mounts.push({
-      hostPath: projectRoot,
+      hostPath: resolveHostPath(projectRoot),
       containerPath: '/workspace/project',
       readonly: false,
     });
 
     // Main also gets its group folder as the working directory
     mounts.push({
-      hostPath: path.join(GROUPS_DIR, group.folder),
+      hostPath: resolveHostPath(path.join(GROUPS_DIR, group.folder)),
       containerPath: '/workspace/group',
       readonly: false,
     });
   } else {
     // Other groups only get their own folder
     mounts.push({
-      hostPath: path.join(GROUPS_DIR, group.folder),
+      hostPath: resolveHostPath(path.join(GROUPS_DIR, group.folder)),
       containerPath: '/workspace/group',
       readonly: false,
     });
 
     // Global memory directory (read-only for non-main)
-    // Apple Container only supports directory mounts, not file mounts
     const globalDir = path.join(GROUPS_DIR, 'global');
     if (fs.existsSync(globalDir)) {
       mounts.push({
-        hostPath: globalDir,
+        hostPath: resolveHostPath(globalDir),
         containerPath: '/workspace/global',
         readonly: true,
       });
@@ -142,7 +157,7 @@ function buildVolumeMounts(
     }
   }
   mounts.push({
-    hostPath: groupSessionsDir,
+    hostPath: resolveHostPath(groupSessionsDir),
     containerPath: '/home/node/.claude',
     readonly: false,
   });
@@ -154,16 +169,15 @@ function buildVolumeMounts(
   fs.mkdirSync(path.join(groupIpcDir, 'tasks'), { recursive: true });
   fs.mkdirSync(path.join(groupIpcDir, 'input'), { recursive: true });
   mounts.push({
-    hostPath: groupIpcDir,
+    hostPath: resolveHostPath(groupIpcDir),
     containerPath: '/workspace/ipc',
     readonly: false,
   });
 
   // Mount agent-runner source from host — recompiled on container startup.
-  // Bypasses Apple Container's sticky build cache for code changes.
   const agentRunnerSrc = path.join(projectRoot, 'container', 'agent-runner', 'src');
   mounts.push({
-    hostPath: agentRunnerSrc,
+    hostPath: resolveHostPath(agentRunnerSrc),
     containerPath: '/app/src',
     readonly: true,
   });
@@ -182,25 +196,63 @@ function buildVolumeMounts(
 }
 
 /**
- * Read allowed secrets from .env for passing to the container via stdin.
+ * Read allowed secrets for passing to the agent container via stdin.
+ * Checks both the .env file and process.env (for Docker Compose env_file).
  * Secrets are never written to disk or mounted as files.
  */
 function readSecrets(): Record<string, string> {
-  return readEnvFile(['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY']);
+  const allowedVars = ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL', 'DEFAULT_MODEL'];
+  const secrets = readEnvFile(allowedVars);
+
+  // Also check process.env as fallback (Docker Compose env_file mode)
+  for (const key of allowedVars) {
+    if (!secrets[key] && process.env[key]) {
+      secrets[key] = process.env[key]!;
+    }
+  }
+
+  return secrets;
+}
+
+function getContainerRuntime(): 'container' | 'docker' {
+  try {
+    // Check if we're explicitly using Docker
+    if (process.env.CONTAINER_RUNTIME === 'docker') {
+      return 'docker';
+    }
+    // Check if Apple Container is available
+    const { execSync } = require('child_process');
+    execSync('which container', { stdio: 'pipe' });
+    return 'container';
+  } catch {
+    // Fall back to Docker
+    return 'docker';
+  }
 }
 
 function buildContainerArgs(mounts: VolumeMount[], containerName: string): string[] {
+  const runtime = getContainerRuntime();
   const args: string[] = ['run', '-i', '--rm', '--name', containerName];
 
   // Apple Container: --mount for readonly, -v for read-write
+  // Docker: Both use --mount syntax
   for (const mount of mounts) {
-    if (mount.readonly) {
+    if (runtime === 'docker') {
+      // Docker uses --mount for both readonly and read-write
       args.push(
         '--mount',
-        `type=bind,source=${mount.hostPath},target=${mount.containerPath},readonly`,
+        `type=bind,source=${mount.hostPath},target=${mount.containerPath}${mount.readonly ? ',readonly' : ''}`,
       );
     } else {
-      args.push('-v', `${mount.hostPath}:${mount.containerPath}`);
+      // Apple Container
+      if (mount.readonly) {
+        args.push(
+          '--mount',
+          `type=bind,source=${mount.hostPath},target=${mount.containerPath},readonly`,
+        );
+      } else {
+        args.push('-v', `${mount.hostPath}:${mount.containerPath}`);
+      }
     }
   }
 
@@ -252,7 +304,8 @@ export async function runContainerAgent(
   fs.mkdirSync(logsDir, { recursive: true });
 
   return new Promise((resolve) => {
-    const container = spawn('container', containerArgs, {
+    const runtime = getContainerRuntime();
+    const container = spawn(runtime, containerArgs, {
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 
@@ -359,7 +412,8 @@ export async function runContainerAgent(
     const killOnTimeout = () => {
       timedOut = true;
       logger.error({ group: group.name, containerName }, 'Container timeout, stopping gracefully');
-      exec(`container stop ${containerName}`, { timeout: 15000 }, (err) => {
+      const stopCmd = runtime === 'docker' ? `docker stop ${containerName}` : `container stop ${containerName}`;
+      exec(stopCmd, { timeout: 15000 }, (err) => {
         if (err) {
           logger.warn({ group: group.name, containerName, err }, 'Graceful stop failed, force killing');
           container.kill('SIGKILL');

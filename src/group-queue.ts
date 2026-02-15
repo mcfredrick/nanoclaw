@@ -53,12 +53,14 @@ export class GroupQueue {
     this.processMessagesFn = fn;
   }
 
-  enqueueMessageCheck(groupJid: string): void {
+  enqueueMessageCheck(groupJid: string, allowParallel = false): void {
     if (this.shuttingDown) return;
 
     const state = this.getGroup(groupJid);
 
-    if (state.active) {
+    // For main group (allowParallel=true), allow multiple containers to run in parallel
+    // Each message gets its own fresh container instead of queuing
+    if (state.active && !allowParallel) {
       state.pendingMessages = true;
       logger.debug({ groupJid }, 'Container active, message queued');
       return;
@@ -125,6 +127,7 @@ export class GroupQueue {
    */
   sendMessage(groupJid: string, text: string): boolean {
     const state = this.getGroup(groupJid);
+    logger.debug({ groupJid, active: state.active, groupFolder: state.groupFolder }, 'sendMessage check');
     if (!state.active || !state.groupFolder) return false;
 
     const inputDir = path.join(DATA_DIR, 'ipc', state.groupFolder, 'input');
@@ -245,6 +248,8 @@ export class GroupQueue {
 
     const state = this.getGroup(groupJid);
 
+    logger.debug({ groupJid, hasPendingTasks: state.pendingTasks.length > 0, hasPendingMessages: state.pendingMessages }, 'drainGroup called');
+
     // Tasks first (they won't be re-discovered from SQLite like messages)
     if (state.pendingTasks.length > 0) {
       const task = state.pendingTasks.shift()!;
@@ -254,6 +259,7 @@ export class GroupQueue {
 
     // Then pending messages
     if (state.pendingMessages) {
+      logger.info({ groupJid }, 'Processing pending messages');
       this.runForGroup(groupJid, 'drain');
       return;
     }

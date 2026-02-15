@@ -10,13 +10,14 @@ import {
   POLL_INTERVAL,
   TRIGGER_PATTERN,
 } from './config.js';
-import { WhatsAppChannel } from './channels/whatsapp.js';
+import { SignalChannel } from './channels/signal.js';
 import {
   ContainerOutput,
   runContainerAgent,
   writeGroupsSnapshot,
   writeTasksSnapshot,
 } from './container-runner.js';
+import { Channel } from './types.js';
 import {
   getAllChats,
   getAllRegisteredGroups,
@@ -48,7 +49,7 @@ let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, string> = {};
 let messageLoopRunning = false;
 
-let whatsapp: WhatsAppChannel;
+let channel: Channel;
 const queue = new GroupQueue();
 
 function loadState(): void {
@@ -99,7 +100,7 @@ export function getAvailableGroups(): import('./container-runner.js').AvailableG
   const registeredJids = new Set(Object.keys(registeredGroups));
 
   return chats
-    .filter((c) => c.jid !== '__group_sync__' && c.jid.endsWith('@g.us'))
+    .filter((c) => c.jid !== '__group_sync__' && (c.jid.endsWith('@g.us') || c.jid.startsWith('signal-group:')))
     .map((c) => ({
       jid: c.jid,
       name: c.name,
@@ -151,17 +152,25 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   );
 
   // Track idle timer for closing stdin when agent is idle
+  // For main group (1-on-1), use short timeout (30s) so container exits after processing current message
+  // For other groups, use long timeout (30min) to keep conversation state
+  const idleTimeout = isMainGroup ? 30000 : IDLE_TIMEOUT; // 30s vs 30min
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
 
   const resetIdleTimer = () => {
     if (idleTimer) clearTimeout(idleTimer);
     idleTimer = setTimeout(() => {
-      logger.debug({ group: group.name }, 'Idle timeout, closing container stdin');
+      logger.debug({ group: group.name, timeout: idleTimeout }, 'Idle timeout, closing container stdin');
       queue.closeStdin(chatJid);
-    }, IDLE_TIMEOUT);
+    }, idleTimeout);
   };
 
-  await whatsapp.setTyping(chatJid, true);
+  // For main group, start the idle timer immediately so container exits after processing
+  if (isMainGroup) {
+    resetIdleTimer();
+  }
+
+  await channel.setTyping?.(chatJid, true);
   let hadError = false;
   let outputSentToUser = false;
 
@@ -170,13 +179,23 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     if (result.result) {
       const raw = typeof result.result === 'string' ? result.result : JSON.stringify(result.result);
       // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
-      const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
+      let text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
+
+      // Filter out tool call syntax that shouldn't be sent to users
+      // Pattern: "We need to call X tool.{" or similar tool call indicators
+      if (text.includes('We need to call') && text.includes('tool.{')) {
+        logger.debug({ group: group.name }, 'Skipping tool call output');
+        text = '';
+      }
+
       logger.info({ group: group.name }, `Agent output: ${raw.slice(0, 200)}`);
       if (text) {
-        await whatsapp.sendMessage(chatJid, text);
+        await channel.sendMessage(chatJid, `${ASSISTANT_NAME}: ${text}`);
         outputSentToUser = true;
       }
-      // Only reset idle timer on actual results, not session-update markers (result: null)
+
+      // Reset idle timer on each output to keep container alive while actively processing
+      // Main group uses 30s timeout, groups use 30min timeout
       resetIdleTimer();
     }
 
@@ -185,7 +204,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     }
   });
 
-  await whatsapp.setTyping(chatJid, false);
+  await channel.setTyping?.(chatJid, false);
   if (idleTimer) clearTimeout(idleTimer);
 
   if (output === 'error' || hadError) {
@@ -212,7 +231,9 @@ async function runAgent(
   onOutput?: (output: ContainerOutput) => Promise<void>,
 ): Promise<'success' | 'error'> {
   const isMain = group.folder === MAIN_GROUP_FOLDER;
-  const sessionId = sessions[group.folder];
+  // For main group (1-on-1), don't use sessions to avoid context accumulation
+  // For other groups, preserve sessions to maintain conversation state
+  const sessionId = isMain ? undefined : sessions[group.folder];
 
   // Update tasks snapshot for container to read (filtered by group)
   const tasks = getAllTasks();
@@ -264,7 +285,9 @@ async function runAgent(
       wrappedOnOutput,
     );
 
-    if (output.newSessionId) {
+    // Only save sessions for non-main groups to preserve conversation state
+    // Main group always starts fresh to avoid context accumulation
+    if (output.newSessionId && !isMain) {
       sessions[group.folder] = output.newSessionId;
       setSession(group.folder, output.newSessionId);
     }
@@ -340,11 +363,35 @@ async function startMessageLoop(): Promise<void> {
             lastAgentTimestamp[chatJid] || '',
             ASSISTANT_NAME,
           );
-          const messagesToSend =
+          let messagesToSend =
             allPending.length > 0 ? allPending : groupMessages;
+
+          // For main group (1-on-1 chats), process one message at a time to avoid batching issues
+          // where multiple rapid messages only get one response
+          if (isMainGroup && messagesToSend.length > 1) {
+            logger.info(
+              { chatJid, totalPending: messagesToSend.length },
+              'Main group: processing messages one at a time (anti-batching)',
+            );
+            messagesToSend = [messagesToSend[0]]; // Only process the first message
+          }
+
           const formatted = formatMessages(messagesToSend);
 
-          if (queue.sendMessage(chatJid, formatted)) {
+          logger.debug({
+            chatJid,
+            lastAgentTimestamp: lastAgentTimestamp[chatJid],
+            allPendingCount: allPending.length,
+            groupMessagesCount: groupMessages.length,
+            messagesToSendCount: messagesToSend.length
+          }, 'Message routing decision');
+
+          // For main group (1-on-1), always start fresh container for each message
+          // Don't pipe to active containers - each message gets its own isolated processing
+          // For other groups, pipe to active container to maintain conversation state
+          const shouldPipe = !isMainGroup && queue.sendMessage(chatJid, formatted);
+
+          if (shouldPipe) {
             logger.debug(
               { chatJid, count: messagesToSend.length },
               'Piped messages to active container',
@@ -353,10 +400,13 @@ async function startMessageLoop(): Promise<void> {
               messagesToSend[messagesToSend.length - 1].timestamp;
             saveState();
             // Show typing indicator while the container processes the piped message
-            whatsapp.setTyping(chatJid, true);
+            channel.setTyping?.(chatJid, true);
           } else {
-            // No active container — enqueue for a new one
-            queue.enqueueMessageCheck(chatJid);
+            // No active container (or main group) — enqueue for a new one
+            if (isMainGroup) {
+              logger.debug({ chatJid }, 'Main group: spawning fresh container (parallel processing allowed)');
+            }
+            queue.enqueueMessageCheck(chatJid, isMainGroup);
           }
         }
       }
@@ -386,59 +436,115 @@ function recoverPendingMessages(): void {
 }
 
 function ensureContainerSystemRunning(): void {
-  try {
-    execSync('container system status', { stdio: 'pipe' });
-    logger.debug('Apple Container system already running');
-  } catch {
-    logger.info('Starting Apple Container system...');
+  const runtime = process.env.CONTAINER_RUNTIME || 'container';
+
+  if (runtime === 'docker') {
+    // Check if Docker is running
     try {
-      execSync('container system start', { stdio: 'pipe', timeout: 30000 });
-      logger.info('Apple Container system started');
+      execSync('docker info', { stdio: 'pipe', timeout: 5000 });
+      logger.debug('Docker is running');
     } catch (err) {
-      logger.error({ err }, 'Failed to start Apple Container system');
+      logger.error({ err }, 'Docker is not running');
       console.error(
         '\n╔════════════════════════════════════════════════════════════════╗',
       );
       console.error(
-        '║  FATAL: Apple Container system failed to start                 ║',
+        '║  FATAL: Docker is not running                                  ║',
       );
       console.error(
         '║                                                                ║',
       );
       console.error(
-        '║  Agents cannot run without Apple Container. To fix:           ║',
+        '║  Please start Docker Desktop or the Docker daemon and restart ║',
       );
       console.error(
-        '║  1. Install from: https://github.com/apple/container/releases ║',
-      );
-      console.error(
-        '║  2. Run: container system start                               ║',
-      );
-      console.error(
-        '║  3. Restart NanoClaw                                          ║',
+        '║  NanoClaw.                                                     ║',
       );
       console.error(
         '╚════════════════════════════════════════════════════════════════╝\n',
       );
-      throw new Error('Apple Container system is required but failed to start');
+      throw new Error('Docker is required but not running');
+    }
+  } else {
+    // Apple Container
+    try {
+      execSync('container system status', { stdio: 'pipe' });
+      logger.debug('Apple Container system already running');
+    } catch {
+      logger.info('Starting Apple Container system...');
+      try {
+        execSync('container system start', { stdio: 'pipe', timeout: 30000 });
+        logger.info('Apple Container system started');
+      } catch (err) {
+        logger.error({ err }, 'Failed to start Apple Container system');
+        console.error(
+          '\n╔════════════════════════════════════════════════════════════════╗',
+        );
+        console.error(
+          '║  FATAL: Apple Container system failed to start                 ║',
+        );
+        console.error(
+          '║                                                                ║',
+        );
+        console.error(
+          '║  Agents cannot run without Apple Container. To fix:           ║',
+        );
+        console.error(
+          '║  1. Install from: https://github.com/apple/container/releases ║',
+        );
+        console.error(
+          '║  2. Run: container system start                               ║',
+        );
+        console.error(
+          '║  3. Restart NanoClaw                                          ║',
+        );
+        console.error(
+          '╚════════════════════════════════════════════════════════════════╝\n',
+        );
+        throw new Error('Apple Container system is required but failed to start');
+      }
     }
   }
 
   // Kill and clean up orphaned NanoClaw containers from previous runs
   try {
-    const output = execSync('container ls --format json', {
-      stdio: ['pipe', 'pipe', 'pipe'],
-      encoding: 'utf-8',
-    });
-    const containers: { status: string; configuration: { id: string } }[] = JSON.parse(output || '[]');
-    const orphans = containers
-      .filter((c) => c.status === 'running' && c.configuration.id.startsWith('nanoclaw-'))
-      .map((c) => c.configuration.id);
-    for (const name of orphans) {
+    let orphans: string[] = [];
+
+    if (runtime === 'docker') {
+      // Docker: list containers with nanoclaw prefix
       try {
-        execSync(`container stop ${name}`, { stdio: 'pipe' });
-      } catch { /* already stopped */ }
+        const output = execSync('docker ps --filter "name=nanoclaw-" --format "{{.Names}}"', {
+          stdio: ['pipe', 'pipe', 'pipe'],
+          encoding: 'utf-8',
+        });
+        // Only target agent containers (nanoclaw-{group}-{timestamp}), not infrastructure
+        // like nanoclaw-signal-api-1 from docker-compose
+        orphans = output.split('\n').filter((n) => n.trim() && /^nanoclaw-.*-\d{10,}$/.test(n.trim()));
+      } catch { /* no orphans */ }
+
+      for (const name of orphans) {
+        try {
+          execSync(`docker stop ${name}`, { stdio: 'pipe', timeout: 10000 });
+        } catch { /* already stopped */ }
+      }
+    } else {
+      // Apple Container
+      const output = execSync('container ls --format json', {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        encoding: 'utf-8',
+      });
+      const containers: { status: string; configuration: { id: string } }[] = JSON.parse(output || '[]');
+      orphans = containers
+        .filter((c) => c.status === 'running' && c.configuration.id.startsWith('nanoclaw-'))
+        .map((c) => c.configuration.id);
+
+      for (const name of orphans) {
+        try {
+          execSync(`container stop ${name}`, { stdio: 'pipe' });
+        } catch { /* already stopped */ }
+      }
     }
+
     if (orphans.length > 0) {
       logger.info({ count: orphans.length, names: orphans }, 'Stopped orphaned containers');
     }
@@ -457,21 +563,27 @@ async function main(): Promise<void> {
   const shutdown = async (signal: string) => {
     logger.info({ signal }, 'Shutdown signal received');
     await queue.shutdown(10000);
-    await whatsapp.disconnect();
+    await channel.disconnect();
     process.exit(0);
   };
   process.on('SIGTERM', () => shutdown('SIGTERM'));
   process.on('SIGINT', () => shutdown('SIGINT'));
 
-  // Create WhatsApp channel
-  whatsapp = new WhatsAppChannel({
+  // Create Signal channel
+  const phoneNumber = process.env.SIGNAL_PHONE_NUMBER;
+  if (!phoneNumber) {
+    throw new Error('SIGNAL_PHONE_NUMBER environment variable required (E.164 format, e.g. +14155551234)');
+  }
+  logger.info({ phoneNumber }, 'Using Signal channel');
+  channel = new SignalChannel({
     onMessage: (chatJid, msg) => storeMessage(msg),
     onChatMetadata: (chatJid, timestamp) => storeChatMetadata(chatJid, timestamp),
     registeredGroups: () => registeredGroups,
+    phoneNumber,
   });
 
   // Connect — resolves when first connected
-  await whatsapp.connect();
+  await channel.connect();
 
   // Start subsystems (independently of connection handler)
   startSchedulerLoop({
@@ -481,14 +593,14 @@ async function main(): Promise<void> {
     onProcess: (groupJid, proc, containerName, groupFolder) => queue.registerProcess(groupJid, proc, containerName, groupFolder),
     sendMessage: async (jid, rawText) => {
       const text = formatOutbound(rawText);
-      if (text) await whatsapp.sendMessage(jid, text);
+      if (text) await channel.sendMessage(jid, text);
     },
   });
   startIpcWatcher({
-    sendMessage: (jid, text) => whatsapp.sendMessage(jid, text),
+    sendMessage: (jid, text) => channel.sendMessage(jid, text),
     registeredGroups: () => registeredGroups,
     registerGroup,
-    syncGroupMetadata: (force) => whatsapp.syncGroupMetadata(force),
+    syncGroupMetadata: () => Promise.resolve(),
     getAvailableGroups,
     writeGroupsSnapshot: (gf, im, ag, rj) => writeGroupsSnapshot(gf, im, ag, rj),
   });

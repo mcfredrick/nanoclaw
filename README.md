@@ -7,9 +7,7 @@
 </p>
 
 <p align="center">
-  <a href="README_zh.md">中文</a>&nbsp; • &nbsp;
-  <a href="https://discord.gg/VGWXrf8x"><img src="https://img.shields.io/discord/1470188214710046894?label=Discord&logo=discord&v=2" alt="Discord" valign="middle"></a>&nbsp; • &nbsp;
-  <a href="repo-tokens"><img src="repo-tokens/badge.svg" alt="34.9k tokens, 17% of context window" valign="middle"></a>
+  <a href="https://discord.gg/VGWXrf8x"><img src="https://img.shields.io/discord/1470188214710046894?label=Discord&logo=discord&v=2" alt="Discord"></a>
 </p>
 
 **New:** First AI assistant to support [Agent Swarms](https://code.claude.com/docs/en/agent-teams). Spin up teams of agents that collaborate in your chat.
@@ -25,10 +23,9 @@ NanoClaw gives you the same core functionality in a codebase you can understand 
 ```bash
 git clone https://github.com/gavrielc/nanoclaw.git
 cd nanoclaw
-claude
 ```
 
-Then run `/setup`. Claude Code handles everything: dependencies, authentication, container setup, service configuration.
+Run `/setup` to configure everything: dependencies, authentication, container setup, and service configuration. The setup will create a `.env` file with the required environment variables.
 
 ## Philosophy
 
@@ -48,12 +45,12 @@ Then run `/setup`. Claude Code handles everything: dependencies, authentication,
 
 ## What It Supports
 
-- **WhatsApp I/O** - Message Claude from your phone
+- **Signal I/O** - Message Claude from your phone via Signal
 - **Isolated group context** - Each group has its own `CLAUDE.md` memory, isolated filesystem, and runs in its own container sandbox with only that filesystem mounted
 - **Main channel** - Your private channel (self-chat) for admin control; every other group is completely isolated
 - **Scheduled tasks** - Recurring jobs that run Claude and can message you back
 - **Web access** - Search and fetch content
-- **Container isolation** - Agents sandboxed in Apple Container (macOS) or Docker (macOS/Linux)
+- **Container isolation** - Agents sandboxed in Docker containers
 - **Agent Swarms** - Spin up teams of specialized agents that collaborate on complex tasks (first personal AI assistant to support this)
 - **Optional integrations** - Add Gmail (`/add-gmail`) and more via skills
 
@@ -91,7 +88,7 @@ The codebase is small enough that Claude can safely modify it.
 
 **Don't add features. Add skills.**
 
-If you want to add Telegram support, don't create a PR that adds Telegram alongside WhatsApp. Instead, contribute a skill file (`.claude/skills/add-telegram/SKILL.md`) that teaches Claude Code how to transform a NanoClaw installation to use Telegram.
+If you want to add Telegram support, don't create a PR that adds Telegram alongside Signal. Instead, contribute a skill file (`.claude/skills/add-telegram/SKILL.md`) that teaches Claude Code how to transform a NanoClaw installation to use Telegram.
 
 Users then run `/add-telegram` on their fork and get clean code that does exactly what they need, not a bloated system trying to support every use case.
 
@@ -100,7 +97,7 @@ Users then run `/add-telegram` on their fork and get clean code that does exactl
 Skills we'd love to see:
 
 **Communication Channels**
-- `/add-telegram` - Add Telegram as channel. Should give the user option to replace WhatsApp or add as additional channel. Also should be possible to add it as a control channel (where it can trigger actions) or just a channel that can be used in actions triggered elsewhere
+- `/add-telegram` - Add Telegram as channel. Should give the user option to replace Signal or add as additional channel. Also should be possible to add it as a control channel (where it can trigger actions) or just a channel that can be used in actions triggered elsewhere
 - `/add-slack` - Add Slack
 - `/add-discord` - Add Discord
 
@@ -114,20 +111,50 @@ Skills we'd love to see:
 
 - macOS or Linux
 - Node.js 20+
+- [Docker](https://docker.com/products/docker-desktop) (required for signal-cli-rest-api and agent runtime)
 - [Claude Code](https://claude.ai/download)
-- [Apple Container](https://github.com/apple/container) (macOS) or [Docker](https://docker.com/products/docker-desktop) (macOS/Linux)
+
+## Setup
+
+Run `/setup` to configure everything. The setup will:
+1. Install dependencies
+2. Configure authentication (Claude Code token or Anthropic API key)
+3. Set up Signal connection
+4. Create required configuration files
+
+### Environment Variables
+
+The setup creates a `.env` file with these required variables:
+- `SIGNAL_PHONE_NUMBER`: Your Signal phone number in E.164 format (e.g., `+14155551234`)
+- `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`: Your Claude authentication
+
+### Start Services
+
+```bash
+docker compose up -d
+```
+
+This starts both the Signal API and NanoClaw services.
+
+### Register Your Main Channel
+
+After setup, run `/setup` again to register your main channel. This is typically your "Note to Self" chat in Signal.
+
+### Test
+
+Send a message from your registered Signal chat. The agent will respond in the same chat.
 
 ## Architecture
 
 ```
-WhatsApp (baileys) --> SQLite --> Polling loop --> Container (Claude Agent SDK) --> Response
+Signal (signal-cli-rest-api webhook) --> SQLite --> Polling loop --> Container (Claude Agent SDK) --> Response
 ```
 
 Single Node.js process. Agents execute in isolated Linux containers with mounted directories. Per-group message queue with concurrency control. IPC via filesystem.
 
 Key files:
 - `src/index.ts` - Orchestrator: state, message loop, agent invocation
-- `src/channels/whatsapp.ts` - WhatsApp connection, auth, send/receive
+- `src/channels/signal.ts` - Signal webhook receiver and REST sender
 - `src/ipc.ts` - IPC watcher and task processing
 - `src/router.ts` - Message formatting and outbound routing
 - `src/group-queue.ts` - Per-group queue with global concurrency limit
@@ -138,13 +165,13 @@ Key files:
 
 ## FAQ
 
-**Why WhatsApp and not Telegram/Signal/etc?**
+**Why Signal?**
 
-Because I use WhatsApp. Fork it and run a skill to change it. That's the whole point.
+It's open source, has strong encryption, and signal-cli-rest-api provides a clean REST/webhook interface. No reverse-engineering proprietary protocols.
 
-**Why Apple Container instead of Docker?**
+**Why Docker?**
 
-On macOS, Apple Container is lightweight, fast, and optimized for Apple silicon. But Docker is also fully supported—during `/setup`, you can choose which runtime to use. On Linux, Docker is used automatically.
+Docker is the only container runtime needed. It handles both the Signal API service and the agent runtime, providing consistent behavior across macOS and Linux.
 
 **Can I run this on Linux?**
 
@@ -161,6 +188,11 @@ We don't want configuration sprawl. Every user should customize it to so that th
 **How do I debug issues?**
 
 Ask Claude Code. "Why isn't the scheduler running?" "What's in the recent logs?" "Why did this message not get a response?" That's the AI-native approach.
+
+**Common issues:**
+- Service not starting: Check `logs/nanoclaw.log`
+- Signal not linked: Verify at `http://localhost:8080/v1/about`
+- No response: Check that the chat is registered
 
 **Why isn't the setup working for me?**
 
