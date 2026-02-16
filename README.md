@@ -3,16 +3,29 @@
 </p>
 
 <p align="center">
-  My personal Claude assistant that runs securely in containers. Lightweight and built to be understood and customized for your own needs.
+  A personal Claude assistant running on Signal via Docker Compose. Fork of <a href="https://github.com/gavrielc/nanoclaw">gavrielc/nanoclaw</a> that replaces WhatsApp entirely with Signal as the sole messaging channel and uses a fully containerized Docker Compose architecture.
 </p>
 
 <p align="center">
   <a href="https://discord.gg/VGWXrf8x"><img src="https://img.shields.io/discord/1470188214710046894?label=Discord&logo=discord&v=2" alt="Discord"></a>
 </p>
 
-**New:** First AI assistant to support [Agent Swarms](https://code.claude.com/docs/en/agent-teams). Spin up teams of agents that collaborate in your chat.
+## What's Different in This Fork
 
-## Why I Built This
+## Migration from WhatsApp to Signal
+
+This fork completely migrates the messaging channel from WhatsApp to Signal. All WhatsApp-related code, authentication flows, and dependencies have been removed. Signal is integrated via the `signal-cli-rest-api` service, providing a secure, open‑source, and container‑friendly way to send and receive messages.
+
+
+
+The [upstream NanoClaw](https://github.com/gavrielc/nanoclaw) originally used WhatsApp as its messaging channel. This fork replaces WhatsApp entirely with **Signal** and runs everything via **Docker Compose**:
+
+- **Signal via [signal-cli-rest-api](https://github.com/bbernhard/signal-cli-rest-api)** — webhook receiver + REST sender, no reverse-engineered protocols
+- **Docker Compose orchestration** — `docker compose up -d` starts both Signal API and NanoClaw as services
+- **Host Docker socket mounting** — NanoClaw spawns agent containers from inside its own container, with `HOST_PROJECT_ROOT` path mapping for correct volume mounts
+- **WhatsApp fully removed** — no WhatsApp code, auth, or dependencies remain
+
+## Why NanoClaw
 
 [OpenClaw](https://github.com/openclaw/openclaw) is an impressive project with a great vision. But I can't sleep well running software I don't understand with access to my life. OpenClaw has 52+ modules, 8 config management files, 45+ dependencies, and abstractions for 15 channel providers. Security is application-level (allowlists, pairing codes) rather than OS isolation. Everything runs in one Node process with shared memory.
 
